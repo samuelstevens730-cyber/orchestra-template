@@ -13,9 +13,11 @@ set -euo pipefail
 # Adjust these to match your CLI installations.
 # Each command should accept a prompt string and output to stdout.
 
-CLAUDE_CMD="claude -p"       # Claude Code CLI (one-shot prompt mode)
-CODEX_CMD="codex exec"       # OpenAI Codex CLI
-GEMINI_CMD="gemini -p"       # Google Gemini CLI
+CLAUDE_CMD="claude -p"                    # Claude Code CLI (one-shot prompt mode)
+CODEX_CMD="codex exec"                    # Codex for reviews (read-only sandbox)
+CODEX_IMPL_CMD="codex --full-auto"        # Codex for implementation (file writes allowed)
+GEMINI_CMD="gemini -p"                    # Google Gemini CLI (prompt as arg)
+GEMINI_STDIN_CMD="gemini"                 # Google Gemini CLI (prompt via stdin, for large contexts)
 
 # Circuit breaker: max revision loops before forcing human intervention
 MAX_PLAN_LOOPS=2             # Max Claude↔Codex plan revision cycles
@@ -69,7 +71,7 @@ gate() {
   echo ""
   
   while true; do
-    read -rp "→ " choice
+    read -rp "→ " choice </dev/tty
     case "$choice" in
       c|C) return 0 ;;
       r|R) 
@@ -224,6 +226,14 @@ timestamped_name() {
   echo "${prefix}-$(date +%Y-%m-%d)-${slug}.md"
 }
 
+# Extract content between exact delimiter lines from a file
+extract_section() {
+  local file="$1"
+  local start="$2"
+  local end="$3"
+  sed -n "/^${start}$/,/^${end}$/{/^${start}$/d;/^${end}$/d;p}" "$file"
+}
+
 # ============================================================================
 # Phase Functions
 # ============================================================================
@@ -231,8 +241,8 @@ timestamped_name() {
 phase_plan() {
   banner "Phase 1: PLAN (Claude)"
   
-  read -rp "Describe the feature/task to plan: " task_description
-  read -rp "Short slug for filename (e.g., add-auth, refactor-api): " task_slug
+  read -rp "Describe the feature/task to plan: " task_description </dev/tty
+  read -rp "Short slug for filename (e.g., add-auth, refactor-api): " task_slug </dev/tty
   
   local plan_file="$PLANS_DIR/$(timestamped_name "plan" "$task_slug")"
   local template="$PLANS_DIR/_TEMPLATE.md"
@@ -271,6 +281,60 @@ Generate a complete plan packet using the template above. Be specific about file
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   info "Review the plan above. Edit $plan_file directly if needed."
+}
+
+phase_revise_plan() {
+  banner "Plan Revision (Claude)"
+
+  local plan_file
+  plan_file=$(latest_file "$PLANS_DIR")
+
+  local review_file
+  review_file=$(latest_file "$REVIEWS_DIR" "review-plan-*")
+
+  if [ -z "$plan_file" ]; then
+    error "No plan file found."
+    exit 1
+  fi
+
+  if [ -z "$review_file" ]; then
+    error "No plan review found."
+    exit 1
+  fi
+
+  info "Revising plan based on Codex feedback..."
+  info "Plan:   $(basename "$plan_file")"
+  info "Review: $(basename "$review_file")"
+  echo ""
+
+  local context
+  context=$(assemble_context "$SOULS_DIR/claude.soul.md" "$plan_file $review_file")
+
+  local revise_prompt="You are the Architect in the Orchestra workflow.
+
+CONTEXT:
+$context
+
+Codex has reviewed your plan and returned feedback (see the review file above).
+Revise the plan to address ALL of Codex's feedback.
+
+Rules:
+- Address every point Codex raised
+- Keep the same plan format and structure
+- Do not add scope beyond what Codex's feedback requires
+- If you disagree with a Codex finding, note the disagreement explicitly in the plan with your rationale
+
+Output the COMPLETE revised plan — not just the changes, the full plan."
+
+  local tmp_prompt
+  tmp_prompt=$(mktemp)
+  echo "$revise_prompt" > "$tmp_prompt"
+
+  $CLAUDE_CMD "$(cat "$tmp_prompt")" 2>&1 | tee "$plan_file"
+
+  rm -f "$tmp_prompt"
+
+  info "Plan revised: $plan_file"
 }
 
 phase_review_plan() {
@@ -364,12 +428,11 @@ Rules:
   info "Invoking Codex to implement..."
   info "(This may take a while for larger changes)"
   echo ""
-  
-  $CODEX_CMD "$(cat "$tmp_prompt")" 2>&1 | tee "$impl_log"
-  
+
+  $CODEX_IMPL_CMD "$(cat "$tmp_prompt")"
+
   rm -f "$tmp_prompt"
-  
-  info "Implementation log saved to: $impl_log"
+
   info "Implementation complete. Review the changes before proceeding."
 }
 
@@ -425,15 +488,14 @@ Do not wrap it in prose. The verdict line must be parseable by automation."
 
 phase_close() {
   banner "Phase 5: CLOSE SESSION (Gemini)"
-  
+
   # Gather all artifacts from this session
   local artifacts=""
+  local plan_basename=""
   local latest_plan
   latest_plan=$(latest_file "$PLANS_DIR")
   if [ -n "$latest_plan" ]; then
     artifacts+="$latest_plan "
-
-    local plan_basename
     plan_basename=$(basename "$latest_plan" .md)
     for prefix in "review-plan-" "impl-log-" "review-impl-"; do
       local candidate="$REVIEWS_DIR/${prefix}${plan_basename}.md"
@@ -442,52 +504,133 @@ phase_close() {
       fi
     done
   fi
-  
+
   local context
   context=$(assemble_context "$SOULS_DIR/gemini.soul.md" "$artifacts")
-  
+
   local close_prompt="You are the Session Closer in the Orchestra workflow.
 
 CONTEXT AND SESSION ARTIFACTS:
 $context
 
-SESSION LOG:
-$(cat "$CONTEXT_DIR/SESSION_LOG.md")
+CURRENT SESSION LOG:
+$(cat "$CONTEXT_DIR/SESSION_LOG.md" 2>/dev/null)
 
-Close this session by:
-1. Writing a SESSION_LOG entry (max 20 lines, newest first format)
-2. Extracting any new DECISIONS with full traceability — this is NON-NEGOTIABLE:
-   - Every decision MUST include rejected alternatives and why they were killed
-   - If a messy compromise was made, document the mess — do not sanitize it
-   - Record what was actually decided, not a cleaned-up version of it
-3. Updating OPEN_LOOPS (add new, mark resolved as closed)
-4. Noting any RESEARCH findings if applicable
-5. Flagging any context files that need pruning
-6. MANDATORY: Updating REPO_CONTEXT.md to reflect any structural changes made this session:
-   - New files/modules created
-   - Files moved or renamed
-   - New architectural patterns introduced
-   - New dependencies added
-   - Changed entry points or data flows
-   If no structural changes occurred, explicitly state 'No REPO_CONTEXT changes needed.'
+Close this session. Your output MUST use the exact delimiters below — the script parses
+these automatically to write the context files. Do not add prose outside the delimited sections.
 
-Output each update as a clearly labeled markdown section so the human can review before applying.
-Use --- dividers between sections."
+===SESSION_LOG_ENTRY_START===
+[New session log entry — max 20 lines, newest-first format. Will be PREPENDED to SESSION_LOG.md.]
+===SESSION_LOG_ENTRY_END===
 
-  local tmp_prompt
+===DECISIONS_ENTRY_START===
+[Any new decisions with full traceability: what/when/why/who/alternatives-rejected/compromises.
+If no new decisions this session, output exactly: NONE]
+===DECISIONS_ENTRY_END===
+
+===OPEN_LOOPS_CONTENT_START===
+[Complete updated content for OPEN_LOOPS.md — add new items, mark resolved ones closed.
+If no changes needed, output exactly: UNCHANGED]
+===OPEN_LOOPS_CONTENT_END===
+
+===REPO_CONTEXT_CONTENT_START===
+[Complete updated content for REPO_CONTEXT.md reflecting structural changes this session.
+If no structural changes occurred, output exactly: UNCHANGED]
+===REPO_CONTEXT_CONTENT_END===
+
+RULES:
+- Use EXACTLY these delimiter lines — no variations, no extra text outside them
+- Anti-sanitization: record what actually happened, not a polished version
+- Every decision MUST include rejected alternatives with real rationale
+- Do NOT editorialize in session logs — facts only"
+
+  local tmp_prompt tmp_output
   tmp_prompt=$(mktemp)
+  tmp_output=$(mktemp)
   echo "$close_prompt" > "$tmp_prompt"
-  
+
   info "Invoking Gemini to close the session..."
   echo ""
-  
-  $GEMINI_CMD "$(cat "$tmp_prompt")" 2>&1
-  
+
+  $GEMINI_STDIN_CMD < "$tmp_prompt" 2>&1 | tee "$tmp_output"
+
   rm -f "$tmp_prompt"
-  
+
   echo ""
-  info "Review Gemini's output above, then manually apply updates to context files."
-  info "(Automation of file writes is a future enhancement — for now, human applies.)"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  info "Applying context file updates..."
+  echo ""
+
+  # SESSION_LOG — prepend new entry
+  local session_entry
+  session_entry=$(extract_section "$tmp_output" "===SESSION_LOG_ENTRY_START===" "===SESSION_LOG_ENTRY_END===")
+  if [ -n "$session_entry" ]; then
+    local tmp_log
+    tmp_log=$(mktemp)
+    { printf "%s\n\n---\n\n" "$session_entry"; cat "$CONTEXT_DIR/SESSION_LOG.md" 2>/dev/null; } > "$tmp_log"
+    mv "$tmp_log" "$CONTEXT_DIR/SESSION_LOG.md"
+    info "SESSION_LOG.md updated."
+  else
+    warn "No SESSION_LOG entry found in Gemini output — SESSION_LOG.md not updated."
+  fi
+
+  # DECISIONS — append new entries
+  local decisions_entry
+  decisions_entry=$(extract_section "$tmp_output" "===DECISIONS_ENTRY_START===" "===DECISIONS_ENTRY_END===")
+  local decisions_trimmed
+  decisions_trimmed=$(echo "$decisions_entry" | tr -d '[:space:]')
+  if [ -n "$decisions_entry" ] && [ "$decisions_trimmed" != "NONE" ]; then
+    { echo ""; echo "$decisions_entry"; } >> "$CONTEXT_DIR/DECISIONS.md"
+    info "DECISIONS.md updated."
+  else
+    info "No new decisions to record."
+  fi
+
+  # OPEN_LOOPS — full replacement if changed
+  local open_loops_content
+  open_loops_content=$(extract_section "$tmp_output" "===OPEN_LOOPS_CONTENT_START===" "===OPEN_LOOPS_CONTENT_END===")
+  local open_loops_trimmed
+  open_loops_trimmed=$(echo "$open_loops_content" | tr -d '[:space:]')
+  if [ -n "$open_loops_content" ] && [ "$open_loops_trimmed" != "UNCHANGED" ]; then
+    echo "$open_loops_content" > "$CONTEXT_DIR/OPEN_LOOPS.md"
+    info "OPEN_LOOPS.md updated."
+  else
+    info "OPEN_LOOPS.md unchanged."
+  fi
+
+  # REPO_CONTEXT — full replacement if changed
+  local repo_context_content
+  repo_context_content=$(extract_section "$tmp_output" "===REPO_CONTEXT_CONTENT_START===" "===REPO_CONTEXT_CONTENT_END===")
+  local repo_context_trimmed
+  repo_context_trimmed=$(echo "$repo_context_content" | tr -d '[:space:]')
+  if [ -n "$repo_context_content" ] && [ "$repo_context_trimmed" != "UNCHANGED" ]; then
+    echo "$repo_context_content" > "$CONTEXT_DIR/REPO_CONTEXT.md"
+    info "REPO_CONTEXT.md updated."
+  else
+    info "REPO_CONTEXT.md unchanged."
+  fi
+
+  # Archive session entry and decisions to history
+  local archive_slug="${plan_basename:-$(date +%H%M%S)}"
+  local archive_date
+  archive_date=$(date +%Y-%m-%d)
+
+  if [ -n "$session_entry" ]; then
+    local session_archive="$ORCH_DIR/history/sessions/session-${archive_date}-${archive_slug}.md"
+    echo "$session_entry" > "$session_archive"
+    info "Session archived to: history/sessions/$(basename "$session_archive")"
+  fi
+
+  if [ -n "$decisions_entry" ] && [ "$decisions_trimmed" != "NONE" ]; then
+    local decisions_archive="$ORCH_DIR/history/decisions/decisions-${archive_date}-${archive_slug}.md"
+    echo "$decisions_entry" > "$decisions_archive"
+    info "Decisions archived to: history/decisions/$(basename "$decisions_archive")"
+  fi
+
+  rm -f "$tmp_output"
+
+  echo ""
+  info "Context files updated. Review them in .orchestra/context/ if needed."
 }
 
 # ============================================================================
@@ -509,113 +652,145 @@ main() {
       info "You'll have a decision gate after each phase."
       info "Circuit breaker: max $MAX_PLAN_LOOPS plan revision loops, $MAX_IMPL_LOOPS impl revision loops."
       echo ""
-      
-      # ---- Phase 1 & 2: Plan + Plan Review (with circuit breaker) ----
-      local plan_loops=0
-      local plan_verdict="NONE"
-      
-      phase_plan
-      gate "Planning" "Plan Review" ""
-      
-      while true; do
-        phase_review_plan
-        
-        # Parse the verdict
-        local latest_review
-        latest_review=$(latest_file "$REVIEWS_DIR" "review-plan-*")
-        if [ -n "$latest_review" ]; then
-          plan_verdict=$(parse_verdict "$latest_review")
-          info "Parsed verdict: $plan_verdict"
-        fi
-        
-        if [ "$plan_verdict" = "APPROVED" ]; then
-          info "Plan APPROVED. Moving to implementation."
-          gate "Plan Review (APPROVED)" "Implementation" ""
-          break
-        fi
-        
-        plan_loops=$((plan_loops + 1))
-        
-        if [ "$plan_loops" -ge "$MAX_PLAN_LOOPS" ]; then
-          local latest_plan
-          latest_plan=$(latest_file "$PLANS_DIR")
-          circuit_break "Plan Review" "$plan_loops" "$MAX_PLAN_LOOPS" "$latest_plan"
-        fi
-        
-        if [ "$plan_verdict" = "BLOCKED" ]; then
-          warn "Plan BLOCKED by Codex (loop $plan_loops/$MAX_PLAN_LOOPS)."
-        elif [ "$plan_verdict" = "APPROVED_WITH_CHANGES" ]; then
-          warn "Plan APPROVED_WITH_CHANGES (loop $plan_loops/$MAX_PLAN_LOOPS)."
-        else
-          warn "Verdict unclear: $plan_verdict (loop $plan_loops/$MAX_PLAN_LOOPS)."
-        fi
-        
+
+      # --- Resume detection ---
+      local start_at="1"
+      local existing_plan
+      existing_plan=$(latest_file "$PLANS_DIR")
+
+      if [ -n "$existing_plan" ]; then
+        echo -e "  Existing plan found: ${BOLD}$(basename "$existing_plan")${NC}"
         echo ""
-        prompt "Revise the plan to address Codex's feedback, then continue."
-        local current_plan
-        current_plan=$(latest_file "$PLANS_DIR")
-        prompt "Plan file to edit: $current_plan"
-        
-        if ! gate "Plan Revision Needed" "Plan Re-Review" ""; then
-          break
-        fi
-      done
-      
+        echo "  [n] Start a new task"
+        echo "  [2] Resume → Review Plan (Codex)"
+        echo "  [3] Resume → Implement (Codex)"
+        echo "  [4] Resume → Review Implementation (Claude)"
+        echo "  [5] Resume → Close Session (Gemini)"
+        echo ""
+        read -rp "→ " rc </dev/tty
+        case "$rc" in
+          2) start_at="2" ;;
+          3) start_at="3" ;;
+          4) start_at="4" ;;
+          5) start_at="5" ;;
+          *) start_at="1" ;;
+        esac
+        echo ""
+      fi
+
+      # ---- Phase 1: Plan ----
+      if [ "$start_at" -le "1" ]; then
+        phase_plan
+        gate "Planning" "Plan Review" ""
+      fi
+
+      # ---- Phase 2: Review Plan (with circuit breaker) ----
+      if [ "$start_at" -le "2" ]; then
+        local plan_loops=0
+        local plan_verdict="NONE"
+
+        while true; do
+          phase_review_plan
+
+          local latest_review
+          latest_review=$(latest_file "$REVIEWS_DIR" "review-plan-*")
+          if [ -n "$latest_review" ]; then
+            plan_verdict=$(parse_verdict "$latest_review")
+            info "Parsed verdict: $plan_verdict"
+          fi
+
+          if [ "$plan_verdict" = "APPROVED" ]; then
+            info "Plan APPROVED. Moving to implementation."
+            gate "Plan Review (APPROVED)" "Implementation" ""
+            break
+          fi
+
+          plan_loops=$((plan_loops + 1))
+
+          if [ "$plan_loops" -ge "$MAX_PLAN_LOOPS" ]; then
+            local latest_plan
+            latest_plan=$(latest_file "$PLANS_DIR")
+            circuit_break "Plan Review" "$plan_loops" "$MAX_PLAN_LOOPS" "$latest_plan"
+          fi
+
+          if [ "$plan_verdict" = "BLOCKED" ]; then
+            warn "Plan BLOCKED by Codex (loop $plan_loops/$MAX_PLAN_LOOPS)."
+          elif [ "$plan_verdict" = "APPROVED_WITH_CHANGES" ]; then
+            warn "Plan APPROVED_WITH_CHANGES (loop $plan_loops/$MAX_PLAN_LOOPS)."
+          else
+            warn "Verdict unclear: $plan_verdict (loop $plan_loops/$MAX_PLAN_LOOPS)."
+          fi
+
+          echo ""
+          prompt "Claude will now revise the plan based on Codex's feedback."
+
+          if ! gate "Plan Revision Needed" "Plan Revision (Claude)" ""; then
+            break
+          fi
+
+          phase_revise_plan
+          gate "Plan Revised" "Plan Re-Review (Codex)" ""
+        done
+      fi
+
       # ---- Phase 3: Implement ----
-      phase_implement
-      gate "Implementation" "Implementation Review" ""
-      
-      # ---- Phase 4: Review Implementation (with circuit breaker) ----
-      local impl_loops=0
-      local impl_verdict="NONE"
-      
-      while true; do
-        phase_review_impl
-        
-        # Parse the verdict
-        local latest_impl_review
-        latest_impl_review=$(latest_file "$REVIEWS_DIR" "review-impl-*")
-        if [ -n "$latest_impl_review" ]; then
-          impl_verdict=$(parse_verdict "$latest_impl_review")
-          info "Parsed verdict: $impl_verdict"
-        fi
-        
-        if [ "$impl_verdict" = "PASS" ]; then
-          info "Implementation PASSED. Moving to session close."
-          gate "Implementation Review (PASS)" "Session Close" ""
-          break
-        fi
-        
-        impl_loops=$((impl_loops + 1))
-        
-        if [ "$impl_loops" -ge "$MAX_IMPL_LOOPS" ]; then
-          local latest_plan
-          latest_plan=$(latest_file "$PLANS_DIR")
-          circuit_break "Implementation Review" "$impl_loops" "$MAX_IMPL_LOOPS" "$latest_plan"
-        fi
-        
-        if [ "$impl_verdict" = "FAIL" ]; then
-          warn "Implementation FAILED review (loop $impl_loops/$MAX_IMPL_LOOPS)."
-        elif [ "$impl_verdict" = "PASS_WITH_FIXES" ]; then
-          warn "Implementation needs fixes (loop $impl_loops/$MAX_IMPL_LOOPS)."
-        else
-          warn "Verdict unclear: $impl_verdict (loop $impl_loops/$MAX_IMPL_LOOPS)."
-        fi
-        
-        echo ""
-        prompt "Address the review feedback, then continue."
-        
-        if ! gate "Implementation Fixes Needed" "Re-implement" ""; then
-          break
-        fi
-        
+      if [ "$start_at" -le "3" ]; then
         phase_implement
-        gate "Implementation (revised)" "Implementation Review" ""
-      done
-      
+        gate "Implementation" "Implementation Review" ""
+      fi
+
+      # ---- Phase 4: Review Implementation (with circuit breaker) ----
+      if [ "$start_at" -le "4" ]; then
+        local impl_loops=0
+        local impl_verdict="NONE"
+
+        while true; do
+          phase_review_impl
+
+          local latest_impl_review
+          latest_impl_review=$(latest_file "$REVIEWS_DIR" "review-impl-*")
+          if [ -n "$latest_impl_review" ]; then
+            impl_verdict=$(parse_verdict "$latest_impl_review")
+            info "Parsed verdict: $impl_verdict"
+          fi
+
+          if [ "$impl_verdict" = "PASS" ]; then
+            info "Implementation PASSED. Moving to session close."
+            gate "Implementation Review (PASS)" "Session Close" ""
+            break
+          fi
+
+          impl_loops=$((impl_loops + 1))
+
+          if [ "$impl_loops" -ge "$MAX_IMPL_LOOPS" ]; then
+            local latest_plan
+            latest_plan=$(latest_file "$PLANS_DIR")
+            circuit_break "Implementation Review" "$impl_loops" "$MAX_IMPL_LOOPS" "$latest_plan"
+          fi
+
+          if [ "$impl_verdict" = "FAIL" ]; then
+            warn "Implementation FAILED review (loop $impl_loops/$MAX_IMPL_LOOPS)."
+          elif [ "$impl_verdict" = "PASS_WITH_FIXES" ]; then
+            warn "Implementation needs fixes (loop $impl_loops/$MAX_IMPL_LOOPS)."
+          else
+            warn "Verdict unclear: $impl_verdict (loop $impl_loops/$MAX_IMPL_LOOPS)."
+          fi
+
+          echo ""
+          prompt "Address the review feedback, then continue."
+
+          if ! gate "Implementation Fixes Needed" "Re-implement" ""; then
+            break
+          fi
+
+          phase_implement
+          gate "Implementation (revised)" "Implementation Review" ""
+        done
+      fi
+
       # ---- Phase 5: Close ----
       phase_close
-      
+
       echo ""
       banner "Workflow Complete"
       info "Session closed. Context files ready for update."
