@@ -1,0 +1,113 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "🎼 Orchestra: Full Workflow (Interactive)",
+      "type": "shell",
+      "command": "./.orchestra/scripts/orchestra.sh",
+      "group": "none",
+      "options": {
+        "shell": {
+          "executable": "bash",
+          "args": ["-c"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "🎼 Orchestra: Plan (Claude)",
+      "type": "shell",
+      "command": "./.orchestra/scripts/orchestra.sh plan",
+      "group": "none",
+      "options": {
+        "shell": {
+          "executable": "bash",
+          "args": ["-c"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "🎼 Orchestra: Review Plan (Codex)",
+      "type": "shell",
+      "command": "./.orchestra/scripts/orchestra.sh review-plan",
+      "group": "none",
+      "options": {
+        "shell": {
+          "executable": "bash",
+          "args": ["-c"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "🎼 Orchestra: Implement (Codex)",
+      "type": "shell",
+      "command": "./.orchestra/scripts/orchestra.sh implement",
+      "group": "none",
+      "options": {
+        "shell": {
+          "executable": "bash",
+          "args": ["-c"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "🎼 Orchestra: Review Implementation (Claude)",
+      "type": "shell",
+      "command": "./.orchestra/scripts/orchestra.sh review-impl",
+      "group": "none",
+      "options": {
+        "shell": {
+          "executable": "bash",
+          "args": ["-c"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "🎼 Orchestra: Close Session (Gemini)",
+      "type": "shell",
+      "command": "./.orchestra/scripts/orchestra.sh close",
+      "group": "none",
+      "options": {
+        "shell": {
+          "executable": "bash",
+          "args": ["-c"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}
