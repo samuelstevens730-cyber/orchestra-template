@@ -47,6 +47,7 @@ your-project/
 │   ├── reviews/                 ← Reviews (Codex reviews plans, Claude reviews impl)
 │   │   ├── _TEMPLATE_PLAN_REVIEW.md
 │   │   └── _TEMPLATE_IMPL_REVIEW.md
+│   ├── feedback/                ← Human feedback + nuclear reconciliations (phase-scoped)
 │   ├── history/                 ← Archived sessions, decisions, research
 │   │   ├── decisions/
 │   │   ├── sessions/
@@ -70,9 +71,13 @@ The rest will populate organically as you use the system.
 Edit the top of `.orchestra/scripts/orchestra.sh` to match your CLI installations:
 
 ```bash
-CLAUDE_CMD="claude -p"       # Adjust flags as needed
-CODEX_CMD="codex exec"       # Adjust flags as needed
-GEMINI_CMD="gemini -p"       # Adjust flags as needed
+CLAUDE_CMD="claude -p"             # Claude: one-shot prompt mode
+CODEX_CMD="codex exec"             # Codex: read-only sandbox (reviews)
+CODEX_IMPL_CMD="codex --full-auto" # Codex: file-write mode (implementation)
+GEMINI_STDIN_CMD="gemini"          # Gemini: prompt via stdin (all Gemini calls)
+
+MAX_PLAN_LOOPS=2                  # Max plan revision cycles before circuit breaker
+MAX_IMPL_LOOPS=2                  # Max impl revision cycles before circuit breaker
 ```
 
 ### 5. Run It
@@ -112,6 +117,45 @@ All phases are available as VS Code tasks for one-click invocation.
 ```
 
 Each transition has a **human gate** — you review the output, can edit files directly, and decide whether to continue, loop back, or stop.
+
+### Gate options
+
+At every gate you have these choices:
+
+| Key | Action |
+|-----|--------|
+| `c` | **Continue** — proceed to the next phase |
+| `r` | **Retry** — loop back (available at revision gates) |
+| `f` | **Feedback** — type notes; the current phase re-runs with your input injected |
+| `n` | **Nuclear** — invoke Gemini as a neutral reconciler to break disagreements |
+| `s` | **Stop** — save progress and exit (resume later) |
+| `q` | **Quit** — exit immediately |
+
+**Feedback (`[f]`):** Your notes are saved to `.orchestra/feedback/feedback-{phase}-{timestamp}.md` and injected as authoritative constraints into the re-run. Feedback is phase-scoped — notes you leave during plan review only affect that phase, not later phases.
+
+**Nuclear (`[n]`):** Gathers the current plan, reviews, and all feedback for the phase, then asks Gemini to identify conflicts and produce a reconciled recommendation. The output is saved to `.orchestra/feedback/reconciled-{phase}-{timestamp}.md` and injected the next time that phase runs.
+
+**Circuit breaker:** If Claude and Codex fail to converge within the configured loop limit, a deadlock gate appears instead of an automatic exit. You can invoke `[n]` nuclear to let Gemini reconcile, or `[c]` to override and continue with the loop counter reset.
+
+### Implement phase — semi-manual
+
+The implement phase is semi-manual because `codex --full-auto` is an interactive TUI that cannot be reliably piped as a subprocess. Instead, Orchestra:
+
+1. Assembles the full implementation prompt (plan + context + feedback) into a context packet file
+2. Prints the command to run — in both bash and PowerShell variants
+3. Waits for you to run Codex in a separate terminal and press `[c]` when done
+
+```
+# bash / Git Bash / WSL:
+codex --full-auto "$(cat '/path/to/.orchestra/tmp-impl-prompt.md')"
+
+# PowerShell:
+codex --full-auto (Get-Content '/path/to/.orchestra/tmp-impl-prompt.md' -Raw)
+```
+
+### Session close — auto-apply
+
+The close phase (Gemini) uses structured delimiters in its output. Orchestra parses these automatically and writes the context files directly — no copy-paste required. Files updated: `SESSION_LOG.md`, `DECISIONS.md`, `OPEN_LOOPS.md`, `REPO_CONTEXT.md`, `PROJECT_STATE.md`, `RESEARCH_LOG.md`. Session summaries and decisions are also archived to `.orchestra/history/`.
 
 ---
 
