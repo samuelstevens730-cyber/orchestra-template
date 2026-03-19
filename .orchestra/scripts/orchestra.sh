@@ -636,12 +636,6 @@ phase_implement() {
 
   info "Implementing plan: $(basename "$plan_file")"
 
-  local plan_basename
-  plan_basename=$(basename "$plan_file" .md)
-
-  # Assemble the implementation prompt and save it to a context packet
-  # so Codex can be run manually in a separate terminal (codex --full-auto
-  # is an interactive TUI and cannot be reliably invoked as a subprocess).
   local context
   context=$(assemble_context "$SOULS_DIR/codex.soul.md" "$plan_file")
 
@@ -663,6 +657,7 @@ Rules:
 - When done, list all files changed/created${feedback_section:+
 - Human feedback is present above — it is authoritative; honour it even if it means a minor deviation from the plan}"
 
+  # Save context packet for reference / debugging.
   local tmp_prompt="$ORCH_DIR/tmp-impl-prompt.md"
   echo "$impl_prompt" > "$tmp_prompt"
 
@@ -677,27 +672,13 @@ Rules:
 
   echo ""
   echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-  prompt "📋 IMPLEMENT — Manual Step Required"
+  prompt "⚙️  IMPLEMENT — Launching Codex (full-auto)"
   echo ""
-  local abs_prompt
-  abs_prompt=$(realpath "$tmp_prompt" 2>/dev/null || echo "$tmp_prompt")
-
-  echo "  The implementation context packet has been saved to:"
-  echo ""
-  echo -e "    ${BOLD}${abs_prompt}${NC}"
-  echo ""
-
-  echo "  Open a NEW terminal in this project's root and run one of:"
-  echo ""
-  echo "  bash / Git Bash / WSL:"
-  echo -e "    ${BOLD}$CODEX_IMPL_CMD \"\$(cat '$abs_prompt')\"${NC}"
-  echo ""
-  echo "  PowerShell:"
-  echo -e "    ${BOLD}$CODEX_IMPL_CMD (Get-Content '$abs_prompt' -Raw)${NC}"
-  echo ""
-  echo "  When Codex finishes, return here and press [c] to continue."
+  echo -e "  ${BOLD}When Codex finishes, press Ctrl+D to return to Orchestra.${NC}"
   echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
   echo ""
+
+  $CODEX_IMPL_CMD "$(cat "$tmp_prompt")" || true
 }
 
 phase_review_impl() {

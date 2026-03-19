@@ -137,21 +137,13 @@ At every gate you have these choices:
 
 **Circuit breaker:** If Claude and Codex fail to converge within the configured loop limit, a deadlock gate appears instead of an automatic exit. You can invoke `[n]` nuclear to let Gemini reconcile, or `[c]` to override and continue with the loop counter reset.
 
-### Implement phase — semi-manual
+### Implement phase
 
-The implement phase is semi-manual because `codex --full-auto` is an interactive TUI that cannot be reliably piped as a subprocess. Instead, Orchestra:
+Orchestra invokes `codex --full-auto` directly, passing the assembled implementation prompt (plan + context + feedback) as an argument. Because `codex --full-auto` is an interactive TUI, it takes over the terminal for the duration of the implementation.
 
-1. Assembles the full implementation prompt (plan + context + feedback) into a context packet file
-2. Prints the command to run — in both bash and PowerShell variants
-3. Waits for you to run Codex in a separate terminal and press `[c]` when done
+**When Codex finishes, press `Ctrl+D` to exit the Codex session and return to Orchestra.**
 
-```
-# bash / Git Bash / WSL:
-codex --full-auto "$(cat '/path/to/.orchestra/tmp-impl-prompt.md')"
-
-# PowerShell:
-codex --full-auto (Get-Content '/path/to/.orchestra/tmp-impl-prompt.md' -Raw)
-```
+The context packet is also saved to `.orchestra/tmp-impl-prompt.md` for reference or debugging.
 
 ### Session close — auto-apply
 
